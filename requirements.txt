@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+requests
+python-dotenv   # optional, agar .env use kar rahe ho
